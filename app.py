@@ -6,7 +6,7 @@ from ibm_watsonx_ai.foundation_models.inference import ModelInference
 from ibm_watsonx_ai.foundation_models.schema import TextChatParameters
 from Models.Idea import Idea
 import json
-from prompts import prompt
+from prompts import strict_prompt, loose_prompt, recommendations_prompt
 
 
 load_dotenv()
@@ -18,7 +18,14 @@ IBM_IAM_API_KEY = os.environ.get("IBM_IAM_API_KEY")
 
 
 def main():
+    global prompt
     idea_ref = input("Enter the reference number of the idea: ")
+    prompt_type = input(
+        "How strict do you want idea correlation? (strict or loose)")
+    if prompt_type == "loose":
+        prompt = loose_prompt
+    else:
+        prompt = strict_prompt
     idea = fetch_idea(idea_ref)
     print(f"The selected Idea is: \n{idea.id}\n{idea.name}")
     all_ideas: list[Idea] = []
@@ -65,6 +72,11 @@ def analyse_ideas(subject_idea: Idea, ideas: list[Idea]):
     MODEL_ID = "openai/gpt-oss-120b"
     model = ModelInference(api_client=client, model_id=MODEL_ID, params=TextChatParameters(
         include_reasoning=False, seed=1, temperature=0, max_tokens=2000), persistent_connection=False)
+    linked_ideas: list[Idea] = []
+    comment: str = """
+        <strong>Comment by watsonx</strong>
+        <h3>I have linked the following ideas to this one:</h3>
+        """
     for idea in ideas:
         response = model.chat(
             messages=[
@@ -81,10 +93,26 @@ def analyse_ideas(subject_idea: Idea, ideas: list[Idea]):
         print("\n")
 
         # if the ideas relate, link them + comment reasoning
-        if "true" in verdict:
+        if ("true" in verdict) | (verdict == True):
             reason: str = json.loads(
                 response["choices"][0]["message"]["content"])["reason"]
             link_ideas(subject_idea, idea, reason)
+            linked_ideas.append(idea)
+            comment += f"""<div><strong><a href="https://bigblue.aha.io/ideas/ideas/{idea.ref}">{idea.ref}</a> | {idea.name}</strong></div><div><span>{idea.description}</span></div><p><strong>Reasoning:</strong> {reason}</p><hr>"""
+    rec_response = write_recommendations(subject_idea, linked_ideas, model)
+    comment += f"""<h3>Here are some recommendations:</h3>"""
+    comment += "<p><strong>Themes</strong></p>"
+    comment += "<ol>"
+    for theme in rec_response["themes"]:
+        comment += f"<li>{theme}</li>"
+    comment += "</ol>"
+    comment += "<br>"
+    comment += "<p><strong>Recommendations</strong></p>"
+    comment += "<ol>"
+    for rec in rec_response["recommendations"]:
+        comment += f"<li>{rec}</li>"
+    comment += "</ol>"
+    write_comment(comment, subject_idea)
 
 
 def link_ideas(idea: Idea, idea_to_link: Idea, reason: str):
@@ -102,12 +130,6 @@ def link_ideas(idea: Idea, idea_to_link: Idea, reason: str):
     requests.post(
         f"https://bigblue.aha.io/api/v1/ideas/{idea.id}/record_links", json=payload, headers={"Authorization": f"Bearer {AHA_API_KEY}"})
 
-    # Add a comment to explain reasoning
-    comment = {"comment": {
-        "body": f"Comment by watsonx:\n I have linked <a href=\"https://bigblue.aha.io/ideas/{idea_to_link.ref}\">{idea_to_link.ref}</a> to this idea. Reasoning: {reason}"}}
-    requests.post(
-        f"https://bigblue.aha.io/api/v1/ideas/{idea.id}/comments", json=comment, headers={"Authorization": f"Bearer {AHA_API_KEY}"})
-
     print("""
         ------------------------------
         ------------------------------
@@ -115,6 +137,31 @@ def link_ideas(idea: Idea, idea_to_link: Idea, reason: str):
         ------------------------------
         ------------------------------
         """)
+
+
+def write_recommendations(subject_idea: Idea, linked_ideas: list[Idea], model: ModelInference):
+    dict_ideas: list[dict] = []
+    for i in linked_ideas:
+        dict_ideas.append(i.__dict__)
+    response = model.chat(
+        messages=[
+            {"role": "user", "content": recommendations_prompt(
+                subject_idea, json.dumps(dict_ideas))}
+        ])
+    # tied to llm response format
+    print(response)
+    themes = json.loads(response["choices"][0]["message"]["content"])["themes"]
+    # tied to llm response format
+    recommendations = json.loads(response["choices"][0]["message"]["content"])[
+        "recommendations"]
+    return {"themes": themes, "recommendations": recommendations}
+
+
+def write_comment(comment: str, subject_idea: Idea):
+    body = {"comment": {
+        "body": comment}}
+    requests.post(
+        f"https://bigblue.aha.io/api/v1/ideas/{subject_idea.id}/comments", json=body, headers={"Authorization": f"Bearer {AHA_API_KEY}"})
 
 
 main()

@@ -9,3 +9,10 @@ class Idea():
         self.ref = ref
         self.name = name
         self.description = description
+
+    def __str__(self):
+        return (f"""
+               Idea Name: {self.name}
+               Idea Reference: {self.ref}
+               Idea Description: {self.description}
+               """)
